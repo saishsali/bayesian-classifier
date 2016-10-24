@@ -4,93 +4,88 @@ from db import Db
 from words import text_to_list
 
 class Classify(Mode):
-	MIN_WORD_COUNT = 5
-	RARE_WORD_PROB = 0.5
-	EXCLUSIVE_WORD_PROB = 0.99
+    MIN_WORD_COUNT = 5
+    RARE_WORD_PROB = 0.5
+    EXCLUSIVE_WORD_PROB = 0.99
 
-	def set_text(self, text):
-		words = text_to_list(text)
+    def set_text(self, text):
+        words = text_to_list(text)
 
-		if not len(words):
-			raise ValueError('Text did not contain any valid words')
+        if not len(words):
+            raise ValueError('Text did not contain any valid words')
 
-		self.words = words
-		return self
+        self.words = words
+        return self
 
-	def set_file_name(self, file_name):
-		try:
-			file_contents = open(file_name, 'r').read()
-			return self.set_text(file_contents)
+    def set_file_name(self, file_name):
+        try:
+            file_contents = open(file_name, 'r').read()
+            return self.set_text(file_contents)
 
-		except Exception as e:
-			raise ValueError('Unable to read specified file "%s", the error message was: %s' % (file_name, e))
+        except Exception as e:
+            raise ValueError('Unable to read specified file "%s", the error message was: %s' % (file_name, e))
 
-	def set_doctypes(self, doctype1, doctype2):
-		if doctype1 == doctype2:
-			raise ValueError('Please enter two different doctypes')
+    def set_doctypes(self, doctypes):
+        self.doctypes = []
+        d = Db().get_doctype_counts()
+        for doctype in doctypes:
+            if doctype not in d.keys():
+                raise ValueError('Unknown doctype: ' + doctype)
+            self.doctypes.append(doctype)
 
-		d = Db().get_doctype_counts()
-		if doctype1 not in d.keys():
-			raise ValueError('Unknown doctype: ' + doctype1)
+    def validate(self, args):
+        if len(args) < 5:
+            raise ValueError('Usage: %s classify <file> <doctype> <doctype>' % args[0])
 
-		if doctype2 not in d.keys():
-			raise ValueError('Unknown doctype: ' + doctype2)
+        self.set_file_name(args[2])
+        self.set_doctypes(args[3:])
 
-		self.doctype1 = doctype1
-		self.doctype2 = doctype2
+    def p_for_word(self, db, word, doctype1, doctype2):
+        word_count_doctype1 = db.get_word_count(doctype1, word)
+        word_count_doctype2 = db.get_word_count(doctype2, word)
 
-	def validate(self, args):
-		if len(args) != 5:
-			raise ValueError('Usage: %s classify <file> <doctype> <doctype>' % args[0])
+        if word_count_doctype1 + word_count_doctype2 < self.MIN_WORD_COUNT:
+            return self.RARE_WORD_PROB
 
-		self.set_file_name(args[2])
-		self.set_doctypes(args[3], args[4])
+        if word_count_doctype1 == 0:
+            return 1 - self.EXCLUSIVE_WORD_PROB
+        elif word_count_doctype2 == 0:
+            return self.EXCLUSIVE_WORD_PROB
 
-	def p_for_word(self, db, word):
-		total_word_count = self.doctype1_word_count + self.doctype2_word_count
+        # P(S|W) = P(W|S) / ( P(W|S) + P(W|H) )
 
-		word_count_doctype1 = db.get_word_count(self.doctype1, word)
-		word_count_doctype2 = db.get_word_count(self.doctype2, word)
-		
-		if word_count_doctype1 + word_count_doctype2 < self.MIN_WORD_COUNT:
-			return self.RARE_WORD_PROB
+        p_ws = word_count_doctype1 / self.doctype1_word_count
+        p_wh = word_count_doctype2 / self.doctype2_word_count
 
-		if word_count_doctype1 == 0:
-				return 1 - self.EXCLUSIVE_WORD_PROB
-		elif word_count_doctype2 == 0:
-				return self.EXCLUSIVE_WORD_PROB
+        return p_ws / (p_ws + p_wh)
 
-		# P(S|W) = P(W|S) / ( P(W|S) + P(W|H) )
+    def p_from_list(self, l):
+        p_product         = reduce(lambda x,y: x*y, l)
+        p_inverse_product = reduce(lambda x,y: x*y, map(lambda x: 1-x, l))
 
-		p_ws = word_count_doctype1 / self.doctype1_word_count
-		p_wh = word_count_doctype2 / self.doctype2_word_count
+        return p_product / (p_product + p_inverse_product)
 
-		return p_ws / (p_ws + p_wh)
+    def execute(self):
+        pl = []
+        db = Db()
 
-	def p_from_list(self, l):
-		p_product         = reduce(lambda x,y: x*y, l)
-		p_inverse_product = reduce(lambda x,y: x*y, map(lambda x: 1-x, l))
+        num_docs = len(self.doctypes)
 
-		return p_product / (p_product + p_inverse_product)
+        for i in range(num_docs):
+            if i == num_docs - 1:
+                break
 
-	def execute(self):
-		pl = []
-		db = Db()
+            for word in self.words:
+                p = self.p_for_word(db, word, self.doctypes[i], self.doctypes[i+1])
+                pl.append(p)
 
-		d = db.get_doctype_counts()
-		self.doctype1_count = d.get(self.doctype1)
-		self.doctype2_count = d.get(self.doctype2)
+            result = self.p_from_list(pl)
 
-		self.doctype1_word_count = db.get_words_count(self.doctype1)
-		self.doctype2_word_count = db.get_words_count(self.doctype2)
+            if result >= 0.5:
+                self.doctypes[i+1] = self.doctypes[i]
 
-		for word in self.words:
-			p = self.p_for_word(db, word)
-			pl.append(p)
+        print self.doctypes[len(self.doctypes) - 1]
+        return result
 
-		result = self.p_from_list(pl)
-
-		return result
-
-	def output(self, result):
-		print 'Probability that document is %s rather than %s is %1.2f' % (self.doctype1, self.doctype2, result)
+    def output(self, result):
+        print 'Probability that document is %s rather than %s is %1.2f' % (self.doctype1, self.doctype2, result)
